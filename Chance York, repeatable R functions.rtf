@@ -1,0 +1,676 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2822
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 require(tidyverse)\
+\
+#palettes\
+###viridis <- rep(c("#FDE725", "#B8DE29", "#5DC863", "#21918C", "#3B528B", "#440A6D"), 20)\
+#cividis <- rep(c("#FFD700", "#FFEA00", "#FFE200", "#B8B8B8", "#808080", "#404040"), 20)\
+temps <- rep(c("#FFE200", "#f9b641ff", "#f68f46ff","#de7065ff", "#b8627dff", "#7e4e90ff", "#593d9cff"), 20)\
+###neutral <- rep(c("#66545e",  "#a39193", "#aa6f73","#d59682", "#eea990","#f1c8a2", "#f6e0b5"), 20)\
+\
+palette(temps)\
+#palette(cividis)\
+\
+#date\
+today.date <- Sys.Date() \
+\
+#merge two dfs with common columns\
+process <- function(file1, file2) \{\
+  df1 <- read.csv2(file1, sep = ",", stringsAsFactors = FALSE)\
+  df2 <- read.csv2(file2, sep = ",", stringsAsFactors = FALSE)\
+  \
+  combined_df <- bind_rows(df1, df2) %>%  \
+    rename_with(~ tolower(.) %>%\
+                  str_replace_all("\\\\.", "_")) %>%  \
+    mutate(across(where(is.character), ~ replace(., . == "", NA))) %>% \
+    select(-any_of(c("comments",\
+                     "legacy_comments",\
+                     "tags",\
+                     "branch",\
+                     "release_version",\
+                     "user_agent",\
+                     "status",\
+                     "referer",\
+                     "sessionid",\
+                     "time_started")))\
+  \
+  return(combined_df)\}\
+\
+\
+#convert yes/no to binary\
+binary <- function(data, var) \{\
+  var <- rlang::ensym(var)  \
+  \
+  data %>%\
+    mutate(!!var := recode(!!var, "Yes" = 1, "No" = 0)) \}\
+\
+\
+#simple completion rate\
+completion <- function(df, first_var, last_var) \{\
+\
+  first_col <- deparse(substitute(first_var))\
+  last_col <- deparse(substitute(last_var))\
+  \
+  started <- sum(!is.na(df[[first_col]]))\
+  \
+  completed <- sum(!is.na(df[[last_col]]))\
+  \
+  completion_rate <- completed / started\
+  \
+  cat(sprintf("Completion Rate: %.1f%% (%d of %d respondents)\\n",\
+              completion_rate * 100, completed, started))\}\
+\
+\
+#falloff\
+falloff <- function(data, ...) \{\
+  page_items <- c(...)\
+  \
+  falloff_data <- tibble(page = names(page_items),\
+                         item = page_items) %>%\
+    rowwise() %>%\
+    mutate(\
+      vars = strsplit(item, "\\\\|"),\
+      reached = list(\
+        data %>%\
+          mutate(reached = if_else(\
+            rowSums(!is.na(across(all_of(vars)))) > 0, 1, 0\
+          )) %>%\
+          summarize(\
+            n_reached = sum(reached),\
+            n_total = n(),\
+            pct_reached = n_reached / n_total,\
+            se = sqrt(pct_reached * (1 - pct_reached) / n_total),\
+            lower = pmax(0, pct_reached - 1.96 * se),\
+            upper = pmin(1, pct_reached + 1.96 * se))\
+      ) ) %>%\
+    unnest_wider(reached) %>%\
+    mutate(\
+      falloff_rate = 1 - pct_reached,\
+      page_factor = factor(page, levels = page),\
+      labs = paste0(page, "\\n(n=", n_reached, ")"))\
+  \
+  print(falloff_data)\
+  \
+  ggplot(falloff_data, aes(x = page_factor, y = pct_reached, fill = page_factor)) +\
+    geom_col() +\
+    geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) +\
+    geom_text(aes(y = upper +.02, label = scales::percent(pct_reached, accuracy = 0.1)),\
+             size = 4) +\
+    geom_line(aes(y = falloff_rate, group = 1),  linetype = "dashed") +\
+    geom_point(aes(y = falloff_rate), size=4, shape=1) +\
+    geom_text(aes(y = falloff_rate-0.02, label = scales::percent(falloff_rate, accuracy = 0.1)),\
+              vjust = 1.5, size = 4) +\
+    scale_fill_manual(values = temps) + \
+    scale_x_discrete(labels = falloff_data$labs) +\
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1),\
+                       sec.axis = sec_axis(~ 1 - ., name = "Falloff Rate (%)", labels = scales::percent_format(accuracy = 1))) +\
+    theme_minimal() +\
+    theme(\
+      panel.grid.major = element_blank(),\
+      legend.position = "none",\
+      axis.title.x = element_text(margin = margin(t = 15))) +\
+    labs(\
+      x = "Survey Page",\
+      y = "Completion Rate (%)",\
+      fill = "Page",\
+      caption = paste('Firefox Quant UR // Updated on', Sys.Date()))\
+\}\
+\
+\
+#parse datetime, version, search engines\
+parse <- function(data, datetime_col = NULL, version_col = NULL, engine_col = NULL) \{\
+  \
+  if (!is.null(datetime_col)) \{\
+    datetime_col <- ensym(datetime_col)  \
+    \
+    data <- data %>%\
+      mutate(\
+        datetime_parsed = mdy_hms(!!datetime_col, tz = "UTC"),\
+        date_submitted = as.Date(datetime_parsed),\
+        time_submitted = format(datetime_parsed, "%I:%M %p") %>% tolower()) %>%\
+      select(-datetime_parsed) \}\
+  \
+  if (!is.null(version_col)) \{\
+    version_col <- ensym(version_col) \
+    \
+    data <- data %>%\
+      mutate(\
+        firefox_version = !!version_col %>%\
+          str_extract("^\\\\d+") %>%  \
+          as.numeric() %>%  \
+          as.factor()  )  \}\
+  \
+  if (!is.null(engine_col)) \{\
+    engine_col <- ensym(engine_col)  \
+    \
+    data <- data %>%\
+      mutate(\
+        search_engine := case_when(\
+          str_detect(!!engine_col, regex("google", ignore_case = TRUE)) ~ "Google",\
+          str_detect(!!engine_col, regex("bing", ignore_case = TRUE)) ~ "Bing",\
+          str_detect(!!engine_col, regex("yahoo", ignore_case = TRUE)) ~ "Yahoo",\
+          str_detect(!!engine_col, regex("duckduckgo|ddg", ignore_case = TRUE)) ~ "DuckDuckGo",\
+          str_detect(!!engine_col, regex("baidu", ignore_case = TRUE)) ~ "Baidu",\
+          str_detect(!!engine_col, regex("yandex", ignore_case = TRUE)) ~ "Yandex",\
+          str_detect(!!engine_col, regex("qwant", ignore_case = TRUE)) ~ "Qwant",\
+          str_detect(!!engine_col, regex("ecosia", ignore_case = TRUE)) ~ "Ecosia",\
+          str_detect(!!engine_col, regex("startpage", ignore_case = TRUE)) ~ "Startpage",\
+          str_detect(!!engine_col, regex("seznam", ignore_case = TRUE)) ~ "Seznam",\
+          str_detect(!!engine_col, regex("naver", ignore_case = TRUE)) ~ "Naver",\
+          str_detect(!!engine_col, regex("sogou", ignore_case = TRUE)) ~ "Sogou",\
+          str_detect(!!engine_col, regex("aol", ignore_case = TRUE)) ~ "AOL",\
+          !!engine_col == "abc123" ~ NA_character_,\
+          !!engine_col == "null" ~ NA_character_,\
+          is.na(!!engine_col) | str_trim(!!engine_col) == "" ~ NA_character_,\
+          TRUE ~ "Other"),\
+        search_engine = factor(\
+          search_engine,\
+          levels = c("Google", "Bing", "Yahoo", "DuckDuckGo", "Qwant", "Ecosia", "Startpage",\
+                     "Naver", "Baidu", "Yandex", "Seznam", "AOL", "Other")) )\}\
+  \
+  return(data)\}\
+\
+\
+\
+\
+#bar plot\
+bar <- function(data, cat_var, filter_expr = NULL, xlab = NULL, order = "desc", ...) \{\
+  cat_var <- enquo(cat_var)  \
+  \
+  if (!missing(...)) \{\
+    data <- data %>% filter(...)\}\
+  \
+  data_processed <- data %>%\
+    filter(!is.na(!!cat_var), !!cat_var != "PNTS") %>%\
+    count(!!cat_var, name = "n") %>%\
+    mutate(\
+      total = sum(n),\
+      prop = n / total,  \
+      se = sqrt(prop * (1 - prop) / n),\
+      t = ifelse(n > 1, qt(0.975, df = n - 1), NA_real_), \
+      perc = prop * 100, \
+      lci = (prop - t * se) * 100, \
+      uci = (prop + t * se) * 100, \
+      labs = paste0(as.character(!!cat_var), "\\n(n=", n, ")")) %>%\
+    mutate(\
+      x = if (order == "original") \{\
+        factor(labs, levels = labs)\} else \{\
+        fct_reorder(labs, n, .desc = (order == "desc")) \})\
+  \
+  print(data_processed)\
+  \
+  plot <- data_processed %>%\
+    ggplot(aes(x = x, y = perc, fill = !!cat_var)) +\
+    geom_col() +\
+    geom_errorbar(aes(ymin = lci, ymax = uci), width = 0.15) +\
+    scale_fill_manual(values = temps) + \
+    scale_y_continuous(labels = scales::percent_format(scale = 1), limits = c(0, 100)) +\
+    geom_text(aes(label = paste0(round(perc), "%"), y = uci), vjust = -0.5) +\
+    ylab("Percent of Sample") +\
+    xlab(xlab) +\
+    theme_minimal() +\
+    theme(\
+      panel.grid.major = element_blank(),\
+      legend.position = "none",\
+      axis.title.x = element_text(margin = margin(t = 15))) +\
+    labs(caption = paste('Firefox Quant UR // Updated on', Sys.Date()))\
+  \
+  ggsave(file = "plot.png", dpi = 300, height = 5, width = 9, bg = "transparent")\
+  \
+  return(plot)\}\
+\
+\
+#histogram\
+hist <- function(data, num_var, xlab = NULL, title = NULL, xlim_range = NULL, filter_expr = NULL, ...) \{\
+  filters <- enquos(...)\
+  \
+  for (filter in filters) \{\
+    data <- data %>%\
+      filter(eval_tidy(filter, data))\
+  \}\
+  \
+  if (!is.null(filter_expr)) \{\
+    data <- data %>% filter(!!filter_expr)\}\
+  \
+  summary_stats <- data %>%\
+    summarise(mean = mean(\{\{num_var\}\}, na.rm = TRUE),\
+              sd = sd(\{\{num_var\}\}, na.rm = TRUE),\
+              min = min(\{\{num_var\}\}, na.rm = TRUE),\
+              max = max(\{\{num_var\}\}, na.rm = TRUE))\
+  \
+  print(summary_stats)\
+  \
+  mean_data <- data.frame(mean = summary_stats$mean)\
+  \
+  plot <- data %>%\
+    filter(!is.na(\{\{num_var\}\})) %>%\
+    ggplot(aes(x = \{\{num_var\}\})) +\
+    geom_histogram(aes(fill = ..count..), bins = 30) +\
+    scale_fill_gradientn(colors = temps) +\
+    geom_vline(data = mean_data, aes(xintercept = mean), lwd = 0.5, linetype = "longdash") +\
+    geom_text(data = mean_data, aes(x = mean, y = Inf, label = paste("Mean =", round(mean))), angle = 90, vjust = -1.5, hjust = 1.1) +\
+    xlab(xlab) +\
+    ylab("Number of Users in Sample") +\
+    theme_minimal() +\
+    theme(panel.grid.major = element_blank(),\
+      legend.position = 'none') +\
+    labs(caption = paste('Firefox Quant UR //', 'Updated on', Sys.Date()),\
+         title = title)\
+  \
+  if (!is.null(xlim_range)) \{\
+    plot <- plot + scale_x_continuous(limits = xlim_range)\}\
+  \
+  ggsave(file = "plot.png", plot = plot, dpi = 300, height = 5, width = 9, bg = "transparent")\
+  \
+  return(plot)\}\
+\
+\
+\
+point <- function(data, cat_var, group_var, filter_expr, height = 5, width = 9, bg = "transparent", order = "original", xlab_text = NULL) \{\
+  cat_var <- enquo(cat_var)\
+  group_var <- enquo(group_var)\
+  \
+  if (!missing(filter_expr)) \{\
+    data <- data %>% filter(\{\{ filter_expr \}\}) \}\
+  \
+  data_processed <- data %>%\
+    filter(!is.na(!!cat_var), !is.na(!!group_var)) %>%\
+    count(!!group_var, !!cat_var) %>%\
+    group_by(!!group_var) %>%\
+    mutate(\
+      perc = n / sum(n) * 100,\
+      lci = perc - 1.96 * sqrt((perc * (100 - perc)) / sum(n)),\
+      uci = perc + 1.96 * sqrt((perc * (100 - perc)) / sum(n)),\
+      labs = paste0(as.character(!!group_var), "\\n(n=", sum(n), ")") ) %>%\
+    ungroup()\
+  \
+  if (order == "asc") \{\
+    data_processed <- data_processed %>%\
+      mutate(labs = factor(labs, levels = sort(unique(labs))))\
+  \} else if (order == "desc") \{\
+    data_processed <- data_processed %>%\
+      mutate(labs = factor(labs, levels = sort(unique(labs), decreasing = TRUE)))\
+  \} else \{\
+    data_processed <- data_processed %>%\
+      mutate(labs = factor(labs, levels = unique(labs)))\}\
+  \
+  plot <- ggplot(data_processed, aes(x = labs, y = perc, color = !!cat_var)) +\
+    geom_point(size = 3, position = position_dodge(width = 0.7)) +\
+    geom_errorbar(\
+      aes(ymin = lci, ymax = uci),\
+      width = 0.1,\
+      position = position_dodge(width = 0.7)) +\
+    geom_text(\
+      aes(\
+        y = uci,\
+        label = paste0(round(perc, 1), "%"),\
+        group = !!cat_var),\
+      position = position_dodge2(width = 0.7, preserve = "single"),\
+      color = "black",\
+      size = 3,\
+      vjust = -2) +\
+    scale_y_continuous(\
+      labels = function(x) paste0(round(x, 1), "%"),\
+      limits = c(0, 100) ) +\
+    scale_color_manual(values = temps) +\
+    ylab("Percent of Group") +\
+    xlab(xlab_text) +\
+    theme_minimal() +\
+    theme(\
+      legend.position = "top",\
+      legend.title = element_blank(),\
+      axis.title.x = element_text(margin = margin(t = 15)),\
+      axis.text.x = element_text(angle = 0, hjust = 0.5),\
+      axis.text.y = element_text(size = 10)) +\
+    labs(caption = paste("Firefox Quant UR // Updated on", Sys.Date()))\
+  \
+  ggsave("plot.png", plot = plot, height = height, width = width, bg = bg, dpi = 300)\
+  \
+  return(plot)\}\
+\
+\
+#multi-selects\
+multi <- function(data, suffix, filter_condition = NULL, xlab = NULL, order = "desc", height = 5, width = 9, bg = "transparent") \{\
+  \
+  # Apply optional filter condition\
+  if (!rlang::quo_is_null(rlang::enquo(filter_condition))) \{\
+    data <- data %>% filter(!!rlang::enquo(filter_condition))\
+  \}\
+  \
+  cols <- grep(paste0(suffix, "$"), names(data), value = TRUE)\
+  \
+  respondents_answered <- data %>%\
+    select(response_id, all_of(cols)) %>%\
+    filter(if_any(-response_id, ~ !is.na(.) & . != "na")) %>%\
+    distinct(response_id)\
+  \
+  total_respondents <- nrow(respondents_answered)\
+  \
+  data_processed <- data %>%\
+    select(response_id, all_of(cols)) %>%\
+    pivot_longer(cols = all_of(cols), names_to = "variable", values_to = "value") %>%\
+    filter(!is.na(value), value != "na") %>%\
+    group_by(variable) %>%\
+    summarize(\
+      n = n(), \
+      total = total_respondents,\
+      perc = (n / total) * 100,\
+      p = perc / 100,\
+      se = sqrt(p * (1 - p) / n),\
+      t = qt(0.975, n - 1),\
+      lci = perc - t * se * 100,\
+      uci = perc + t * se * 100\
+    ) %>%\
+    ungroup() %>%\
+    mutate(\
+      cat_label = gsub(suffix, "", variable),\
+      cat_label = gsub("(?<=.)__(?=.)", " / ", cat_label, perl = TRUE),\
+      cat_label = gsub("_", " ", cat_label),\
+      cat_label = gsub(\
+        "\\\\b(Didn|Wasn|Wouldn|Couldn|Shouldn|Aren|Ain|Don|Doesn|Hadn|Hasn|Haven|Isn|Mightn|Mustn|Needn|Shan|Won|Can|Could) t\\\\b",\
+        "\\\\1't", cat_label, ignore.case = TRUE),\
+      cat_label = str_to_title(cat_label), \
+      cat_label = paste0(cat_label, "\\n(n=", n, ")")\
+    )\
+  \
+  plot <- ggplot(data_processed, aes(\
+    x = fct_reorder(cat_label, perc, .desc = (order == "desc")), \
+    y = perc, fill = cat_label)) +\
+    geom_col() +\
+    geom_errorbar(aes(ymin = lci, ymax = uci), width = 0.15) +\
+    scale_fill_manual(values = temps) + \
+    scale_y_continuous(labels = scales::percent_format(scale = 1), limits = c(0, 100)) +\
+    geom_text(aes(label = paste0(round(perc), "%"), y = uci), hjust = -0.5) +\
+    ylab("Percent of Sample") + \
+    xlab(xlab) +\
+    theme_minimal() +\
+    theme(\
+      legend.position = "none",\
+      axis.title.x = element_text(margin = margin(t = 15)),\
+      axis.text.y = element_text(size = 9)\
+    ) +\
+    coord_flip() +\
+    labs(caption = paste("Firefox Quant UR // Updated on", Sys.Date()))\
+  \
+  print(plot)\
+  \
+  ggsave(file = "plot.png", dpi = 300, height = 5, width = 9, bg = "transparent")\
+\}\
+\
+\
+\
+\
+\
+#correlation heatmaps\
+corr <- function(data, suffix, filter_var = NULL, filter_value = NULL, title = NULL, method = "pearson") \{\
+  require(corrr)\
+  \
+  if (!is.null(filter_var)) \{\
+    data <- data %>% filter(\{\{ filter_var \}\} == filter_value)\
+  \}\
+  \
+  cols <- grep(paste0(suffix, "$"), names(data), value = TRUE)\
+  \
+  data_processed <- data %>%\
+    select(all_of(cols), response_id) %>%\
+    pivot_longer(cols = -response_id, names_to = "variable", values_to = "value") %>%\
+    filter(!is.na(value), value != "na") %>%\
+    group_by(variable) %>%\
+    summarize(\
+      n = n(),\
+      total = n_distinct(response_id),\
+      .groups = "drop"\
+    )\
+  \
+  # Print the sample size\
+  sample_n <- max(data_processed$total, na.rm = TRUE)\
+  message("Sample size (n = ", sample_n, ")")\
+  \
+  binary_df <- data %>%\
+    select(all_of(cols)) %>%\
+    mutate(across(everything(), ~ na_if(., "Products_unsure"))) %>%\
+    mutate(across(everything(), ~ na_if(., "Products_none"))) %>%\
+    mutate(across(everything(), ~ na_if(., "None of these"))) %>%\
+    mutate(across(everything(), ~ na_if(., "Not sure"))) %>%\
+    mutate(across(everything(), ~ na_if(., "None_onboard"))) %>%\
+    mutate(across(everything(), ~ na_if(., "None_customize"))) %>%\
+    mutate(across(everything(), ~ as.numeric(!is.na(.))))\
+  \
+  if (method == "tetra") \{\
+    corr_matrix <- suppressWarnings(psych::tetrachoric(binary_df)$rho %>%\
+                                      as.data.frame() %>%\
+                                      rownames_to_column("x") %>%\
+                                      pivot_longer(-x, names_to = "y", values_to = "r"))\
+  \} else \{\
+    corr_matrix <- corrr::correlate(binary_df, method = method) %>%\
+      corrr::stretch(na.rm = TRUE)\
+  \}\
+  \
+  corr_long <- corr_matrix %>%\
+    mutate(\
+      x = str_remove(x, paste0(suffix, "$")),\
+      y = str_remove(y, paste0(suffix, "$")),\
+      x = if_else(!str_detect(x, "___$"), str_replace_all(x, "___", " / "), x),\
+      y = if_else(!str_detect(y, "___$"), str_replace_all(y, "___", " / "), y),\
+      x = if_else(!str_detect(x, "__$"), str_replace_all(x, "__", " / "), x),\
+      y = if_else(!str_detect(y, "__$"), str_replace_all(y, "__", " / "), y),\
+      x = str_replace_all(x, "_", " "),\
+      y = str_replace_all(y, "_", " "),\
+      x = gsub("\\\\b(Didn|Wasn|Wouldn|Couldn|Shouldn|Aren|Ain|Don|Doesn|Hadn|Hasn|Haven|Isn|Mightn|Mustn|Needn|Shan|Won|Can|Could) t\\\\b", "\\\\1't", x, ignore.case = TRUE),\
+      y = gsub("\\\\b(Didn|Wasn|Wouldn|Couldn|Shouldn|Aren|Ain|Don|Doesn|Hadn|Hasn|Haven|Isn|Mightn|Mustn|Needn|Shan|Won|Can|Could) t\\\\b", "\\\\1't", y, ignore.case = TRUE),\
+      x = str_to_title(x),\
+      y = str_to_title(y),\
+      label = round(r, 2),\
+      r_bin = round(r, 1)\
+    )\
+  \
+  plot<-ggplot(corr_long, aes(x = x, y = y, fill = as.factor(r_bin))) +\
+    geom_tile(color = "white") +\
+    geom_text(aes(label = label), size = 3.5, color = "black") +\
+    scale_fill_manual(values = temps, name = "r (binned)") +\
+    coord_fixed() +\
+    theme_minimal(base_size = 11) +\
+    labs(\
+      title = title,\
+      x = NULL,\
+      y = NULL,\
+      caption = paste("Firefox Quant UR // Updated on", Sys.Date())\
+    ) +\
+    theme(\
+      axis.text.x = element_text(angle = 45, hjust = 1),\
+      panel.grid = element_blank()\
+    )\
+  \
+  print(plot)\
+  \
+  ggsave(file = "plot.png", dpi = 300, height = 9, width = 9, bg = "transparent")\
+\}\
+\
+\
+\
+\
+\
+ols <- function(data, dependent_var, predictors, ref_groups) \{\
+  require(stats)\
+  require(broom)\
+\
+  for (var in names(ref_groups)) \{\
+    if (!is.factor(data[[var]])) \{\
+      data[[var]] <- factor(data[[var]]) \}\
+    data[[var]] <- relevel(data[[var]], ref = ref_groups[[var]]) \}\
+  \
+  formula <- as.formula(paste(dependent_var, "~", paste(predictors, collapse = " + ")))\
+  \
+  model <- lm(formula, data = data)\
+  \
+  cat("Ordinary Least Squares Regression Summary:\\n\\n")\
+  print(summary(model))\
+  \
+  coefs <- summary(model)$coefficients\
+  ci <- confint(model)\
+  t <- coefs[, "Estimate"] / coefs[, "Std. Error"]\
+  p <- 2 * (1 - pt(abs(t), df = model$df.residual))\
+  \
+  stars <- cut(p,\
+               breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf),\
+               labels = c("***", "**", "*", ".", ""))\
+  \
+  result <- data.frame(\
+    Beta = round(coefs[, "Estimate"], 3),\
+    LCI = round(ci[, 1], 3),\
+    UCI = round(ci[, 2], 3),\
+    t = round(t, 3),\
+    p = round(p, 3),\
+    sig = stars)\
+  \
+  cat("\\nUnstandardized Coefficients with 95% Confidence Intervals and Significance:\\n\\n")\
+  print(result)\
+  \
+  invisible(model)\}\
+\
+\
+\
+#logit\
+logit <- function(data, dependent_var, predictors, ref_groups) \{\
+  require(stats)\
+  require(broom)\
+  \
+  for (var in names(ref_groups)) \{\
+    if (!is.factor(data[[var]])) \{\
+      data[[var]] <- factor(data[[var]]) \}\
+    data[[var]] <- relevel(data[[var]], ref = ref_groups[[var]]) \}\
+  \
+  formula <- as.formula(paste(dependent_var, "~", paste(predictors, collapse = " + ")))\
+  \
+  model <- glm(formula, data = data, family = binomial)\
+  \
+  cat("Binomial Logistic Regression Summary:\\n\\n")\
+  print(summary(model))\
+  \
+  coefs <- summary(model)$coefficients\
+  or <- exp(coefs[, "Estimate"])\
+  ci <- exp(confint.default(model))\
+  z <- coefs[, "Estimate"] / coefs[, "Std. Error"]\
+  p <- 2 * (1 - pnorm(abs(z)))\
+  \
+  stars <- cut(p,\
+               breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf),\
+               labels = c("***", "**", "*", ".", ""))\
+  \
+  result <- data.frame(\
+    OR = round(or, 3),\
+    LCI = round(ci[, 1], 3),\
+    UCI = round(ci[, 2], 3),\
+    z = round(z, 3),\
+    p = round(p, 3),\
+    sig = stars)\
+  \
+  cat("\\nOdds Ratios with 95% Confidence Intervals and Significance:\\n\\n")\
+  print(result)\
+  \
+  non_missing_data <- data[complete.cases(data[predictors]), ]\
+  \
+  non_missing_data$predicted_probabilities <- predict(model, newdata = non_missing_data, type = "response")\
+  \
+  data$predicted_probabilities <- NA\
+  data[complete.cases(data[predictors]), "predicted_probabilities"] <- non_missing_data$predicted_probabilities\
+  \
+  return(list(model = model, data = data))\}\
+\
+\
+\
+\
+\
+#ordered logit\
+ologit <- function(data, dependent_var, predictors, ref_groups) \{\
+  require(ordinal)\
+  require(broom)\
+\
+  for (var in names(ref_groups)) \{\
+    if (!is.factor(data[[var]])) \{\
+      data[[var]] <- factor(data[[var]]) \}\
+    data[[var]] <- relevel(data[[var]], ref = ref_groups[[var]]) \}\
+  \
+  formula <- as.formula(paste(dependent_var, "~", paste(predictors, collapse = " + ")))\
+  \
+  model <- clm(formula, data = data)\
+  \
+  cat("Ordered Logistic Regression Summary:\\n\\n")\
+  print(summary(model))\
+\
+    coefs <- summary(model)$coefficients\
+  or <- exp(coefs[, "Estimate"])\
+  ci <- exp(confint(model))\
+  z <- coefs[, "Estimate"] / coefs[, "Std. Error"]\
+  p <- 2 * (1 - pnorm(abs(z)))\
+  \
+  stars <- cut(p,\
+               breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf),\
+               labels = c("***", "**", "*", ".", ""))\
+  \
+  result <- data.frame(\
+    OR = round(or, 3),\
+    LCI = round(ci[, 1], 3),\
+    UCI = round(ci[, 2], 3),\
+    z = round(z, 3),\
+    p = round(p, 3),\
+    sig = stars)\
+  \
+  cat("\\nOdds Ratios with 95% Confidence Intervals and Significance:\\n\\n")\
+  print(result)\
+  \
+  invisible(model)\}\
+\
+\
+\
+#multinomial logit \
+mlogit <- function(data, dependent_var, predictors, ref_groups) \{\
+  require(nnet)\
+\
+  for (var in names(ref_groups)) \{\
+    if (!is.factor(data[[var]])) \{\
+      data[[var]] <- factor(data[[var]]) \}\
+    data[[var]] <- relevel(data[[var]], ref = ref_groups[[var]]) \}\
+  \
+  formula <- as.formula(paste(dependent_var, "~", paste(predictors, collapse = " + ")))\
+  \
+  model <- multinom(formula, data = data)\
+  coefs <- summary(model)$coefficients\
+  ses <- summary(model)$standard.errors\
+ \
+  outcome_levels <- rownames(coefs)\
+  for (i in seq_along(outcome_levels)) \{\
+    level <- outcome_levels[i]\
+    est <- coefs[level, ]\
+    se <- ses[level, ]\
+    z <- est / se\
+    p <- 2 * (1 - pnorm(abs(z)))\
+    or <- exp(est)\
+    lci <- exp(est - 1.96 * se)\
+    uci <- exp(est + 1.96 * se)\
+    stars <- cut(p,\
+                 breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf),\
+                 labels = c("***", "**", "*", ".", ""))\
+    \
+    results <- data.frame(\
+      Variable = names(est),\
+      OR = round(or, 3),\
+      LCI = round(lci, 3),\
+      UCI = round(uci, 3),\
+      z = round(z, 3),\
+      p = round(p, 3),\
+      sig = stars )\
+    \
+    cat("\\nMultinomial Logistic Regression Results for outcome level:", level, "\\n\\n")\
+    print(results)\}\
+  \
+  invisible(model)\}\
+\
+\
+\
+}
